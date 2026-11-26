@@ -1,7 +1,7 @@
 import { getDataset } from "@/lib/data/dataset";
 import { listBets } from "@/lib/data/management";
 import { computeSnapshot } from "@/engine/snapshot";
-import { benchmarksFrom, DEFAULT_PLANNER_ASSUMPTIONS, runPlan, scoreBets } from "@/engine/planner";
+import { benchmarksFrom, betEconomics, decomposeStretch, DEFAULT_PLANNER_ASSUMPTIONS, runPlan } from "@/engine/planner";
 import { Assumption, Badge, Card, Note, PageHeader, Stat, Td, Th } from "@/components/ui";
 import { WaterfallChart } from "@/components/charts";
 import { inr, num, pct } from "@/lib/format";
@@ -17,12 +17,17 @@ export default async function PlannerPage() {
   const bench = benchmarksFrom(final);
   const base = runPlan("base", bench);
   const stretch = runPlan("stretch", bench);
-  const bets = scoreBets(await listBets());
+  const betRows = await listBets();
   const a = DEFAULT_PLANNER_ASSUMPTIONS;
+  // Live sequential decomposition base → stretch (Slide 2's waterfall and scores).
+  const decomp = decomposeStretch(bench);
+  const econ = new Map(betEconomics(decomp.steps, new Map(betRows.map((b) => [b.bet_id, b.confidence]))).map((e) => [e.bet_id, e]));
+  const bets = betRows.map((b) => ({ ...b, econ: econ.get(b.bet_id) }));
+  const SHORT: Record<string, string> = { B1: "Pods", B2: "Show-up", B3: "Flywheel", B4: "Paid cap", B5: "Creators" };
   const waterfall = [
-    { label: "Base", value: Math.round(base.totals.attendees), kind: "base" as const },
-    ...bets.map((b) => ({ label: b.name.split(" ")[0] === "Ambassador" ? "Flywheel" : b.name.split(/[ :+→]/)[0], value: b.incremental_attendees, kind: b.incremental_attendees >= 0 ? ("up" as const) : ("down" as const) })),
-    { label: "Stretch", value: Math.round(base.totals.attendees + bets.reduce((s, b) => s + b.incremental_attendees, 0)), kind: "total" as const },
+    { label: "Base", value: Math.round(decomp.base), kind: "base" as const },
+    ...decomp.steps.map((s) => ({ label: SHORT[s.bet_id] ?? s.bet_id, value: Math.round(s.delta_attendees), kind: s.delta_attendees >= 0 ? ("up" as const) : ("down" as const) })),
+    { label: "Stretch", value: Math.round(decomp.stretch), kind: "total" as const },
   ];
 
   return (
@@ -82,26 +87,29 @@ export default async function PlannerPage() {
       </Card>
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-5">
-        <Card className="xl:col-span-3" title="Five bets, ranked" subtitle="Priority score = incremental attendees × confidence ÷ cost (₹ lakh), computed live. Budget cuts are not scored.">
+        <Card className="xl:col-span-3" title="Five bets, ranked" subtitle="Computed live by sequential decomposition of base → stretch (Pods → Flywheel → Show-up → Paid cap → Creators). Score = Δ attendees × confidence ÷ marginal ₹ (lakh).">
           <div className="-mx-4 overflow-x-auto">
             <table className="min-w-full">
-              <thead><tr><Th className="pl-4">#</Th><Th>Bet</Th><Th>Call</Th><Th className="text-right">+Attendees</Th><Th className="text-right">Budget</Th><Th className="text-right">Confidence</Th><Th className="pr-4 text-right">Score</Th></tr></thead>
+              <thead><tr><Th className="pl-4">#</Th><Th>Bet</Th><Th>Call</Th><Th className="text-right">Δ Attendees</Th><Th className="text-right">Marginal ₹</Th><Th className="text-right">Per ₹1L</Th><Th className="text-right">Conf.</Th><Th className="pr-4 text-right">Score / net</Th></tr></thead>
               <tbody className="divide-y divide-zinc-100">
                 {bets.map((b) => (
                   <tr key={b.bet_id}>
                     <Td className="pl-4 num">{b.rank}</Td>
                     <Td className="font-medium">{b.name}</Td>
                     <Td><Badge tone={CALL_TONE[b.call as keyof typeof CALL_TONE] ?? "zinc"}>{CALL_LABEL[b.call as keyof typeof CALL_LABEL] ?? b.call}</Badge></Td>
-                    <Td className="num text-right">{b.incremental_attendees > 0 ? "+" : ""}{num(b.incremental_attendees)}</Td>
-                    <Td className="num text-right">{inr(b.budget_inr, { compact: true })}</Td>
+                    <Td className="num text-right">{b.econ ? <>{b.econ.delta_attendees > 0 ? "+" : ""}{num(Math.round(b.econ.delta_attendees))}</> : "—"}</Td>
+                    <Td className="num text-right">{b.econ ? inr(b.econ.delta_spend, { compact: true }) : "—"}</Td>
+                    <Td className="num text-right">{b.econ?.attendees_per_lakh ? num(Math.round(b.econ.attendees_per_lakh)) : "—"}</Td>
                     <Td className="num text-right">{b.confidence.toFixed(2)}</Td>
-                    <Td className="num pr-4 text-right font-semibold">{b.score === null ? "—" : num(Math.round(b.score))}</Td>
+                    <Td className="num pr-4 text-right font-semibold" title={b.econ?.net_if_reinvested !== null && b.econ?.net_if_reinvested !== undefined ? "Attendees regained if the freed budget moves into the most efficient bet, minus attendees lost" : undefined}>
+                      {b.econ?.score !== null && b.econ?.score !== undefined ? num(Math.round(b.econ.score)) : b.econ?.net_if_reinvested !== null && b.econ?.net_if_reinvested !== undefined ? <span className="text-emerald-700">+{num(Math.round(b.econ.net_if_reinvested))} net</span> : "—"}
+                    </Td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <Note>Confidence weights and programme costs are assumptions from the strategy deck. Overlap is handled by sequencing: referrals follow pods, and show-up is sized last because it multiplies every channel.</Note>
+          <Note>Order matters because effects overlap: referrals scale with other segments&apos; registrants, and Show-up multiplies every channel, so it is applied after the reach bets. Cuts show the net effect if the freed budget moves into Pods. Confidence weights and programme costs (₹40k pod prizes, ₹45k show-up stack, ₹40 per referred attendee) are deck assumptions.</Note>
         </Card>
         <Card className="xl:col-span-2" title="Contribution waterfall (verified attendees)">
           <WaterfallChart steps={waterfall} />

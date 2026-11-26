@@ -5,7 +5,7 @@ import path from "node:path";
 import { parseWorkbook, type ParsedDataset } from "@/lib/ingest/parse";
 import { computeSnapshot } from "@/engine/snapshot";
 import { DEFAULT_SETTINGS } from "@/engine/metrics";
-import { benchmarksFrom, runPlan, scoreBets } from "@/engine/planner";
+import { benchmarksFrom, betEconomics, decomposeStretch, runPlan, scoreBets } from "@/engine/planner";
 import { computeBreakdown } from "@/engine/series";
 import { BETS } from "@/lib/seed-data";
 
@@ -34,6 +34,24 @@ describe("2026 planner", () => {
     const b = computeBreakdown(ds, "2025-04-20", "attendance_by_day") as { values: { two_day_share: number } };
     expect(b.values.two_day_share).toBeGreaterThan(0.33);
     expect(b.values.two_day_share).toBeLessThan(0.38);
+  });
+  it("sequential decomposition reproduces Slide 2 (waterfall, scores, net effects)", () => {
+    const bench = benchmarksFrom(computeSnapshot(ds, "2025-04-20", DEFAULT_SETTINGS));
+    const d = decomposeStretch(bench);
+    const deltas = d.steps.map((s) => Math.round(s.delta_attendees));
+    expect(deltas[0]).toBe(1444); // Pods
+    expect(Math.abs(deltas[1] - 845)).toBeLessThanOrEqual(1); // Flywheel
+    expect(deltas[2]).toBe(378); // Show-up
+    expect(deltas[3]).toBe(-169); // Paid cap
+    expect(deltas[4]).toBe(-69); // Creators
+    const econ = betEconomics(d.steps, new Map(BETS.map((b) => [b.bet_id, b.confidence])));
+    const by = Object.fromEntries(econ.map((e) => [e.bet_id, e]));
+    expect(Math.round(by.B1.score!)).toBe(606);
+    expect(Math.round(by.B2.score!)).toBe(475);
+    expect(Math.round(by.B3.score!)).toBe(392);
+    expect(Math.round(by.B4.net_if_reinvested!)).toBe(131); // deck: "+130 net"
+    expect(Math.round(by.B5.net_if_reinvested!)).toBe(78); // deck: "+77 net"
+    expect(Math.round(by.B1.attendees_per_lakh!)).toBe(866);
   });
   it("bet scores follow attendees × confidence ÷ ₹ lakh", () => {
     const rows = scoreBets(BETS.map((b) => ({ ...b })));

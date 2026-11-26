@@ -14,6 +14,7 @@ import { confirmProposalAction, proposalStatusesAction, rejectProposalAction } f
 const STORAGE_KEY = "gc-analyst-chat-v1";
 
 const STARTERS = [
+  "Run my Monday review: what changed in the last 7 days, current verdicts, overdue tasks, and the actions you'd propose.",
   "What should we scale, fix or stop this week?",
   "Where is the biggest leak in the funnel, and which campaigns cause it?",
   "Are we on track for the visitor goal? What's the gap?",

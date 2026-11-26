@@ -10,7 +10,8 @@
     "test": "vitest run",
     "db:setup": "tsx --env-file=.env.local scripts/setup-db.ts",
     "typecheck": "next typegen && tsc --noEmit",
-    "eval": "tsx --env-file=.env.local scripts/eval.mts"
+    "eval": "tsx --env-file=.env.local scripts/eval.mts",
+    "demo:reset": "tsx --env-file=.env.local scripts/reset-demo.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.128",

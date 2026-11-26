@@ -1,4 +1,5 @@
-// Dev smoke test: two-step tool loop against Gemini (primary, then fallback model).
+// Checks that both configured Gemini models answer a two-step tool call.
+// Usage: npx tsx --env-file=.env.local scripts/check-models.mts
 import { generateText, isStepCount, tool } from "ai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { z } from "zod";
@@ -21,6 +22,7 @@ async function run(modelId: string, thinking: boolean) {
     console.log(modelId, "thinking:", thinking, "ERROR", err.statusCode, err.message?.slice(0, 300), err.responseBody?.slice(0, 300));
   }
 }
-// primary skipped
-// primary skipped
+
+
+await run(process.env.GEMINI_MODEL_PRIMARY!, true);
 await run(process.env.GEMINI_MODEL_FALLBACK!, true);

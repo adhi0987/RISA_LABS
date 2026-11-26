@@ -92,26 +92,32 @@ export function benchmarksFrom(final: Snapshot): Map<string, Bench> {
   return m;
 }
 
+/** One segment with its parameters fully resolved (lets the decomposition mix base and stretch settings). */
+type Resolved = { seg: SegmentInputs; params: DriverParams; upliftPts: number; extraCostPerAttendee: number };
+
+function resolveScenario(scenario: Scenario, segments: SegmentInputs[]): Resolved[] {
+  return segments.map((seg) => ({
+    seg,
+    params: seg[scenario],
+    upliftPts: scenario === "stretch" ? seg.show_uplift_pts_stretch : 0,
+    extraCostPerAttendee: scenario === "stretch" ? seg.extra_cost_per_attendee_stretch ?? 0 : 0,
+  }));
+}
+
 export function runPlan(scenario: Scenario, bench: Map<string, Bench>, segments = DEFAULT_SEGMENTS, a = DEFAULT_PLANNER_ASSUMPTIONS): PlanResult {
-  const results: SegmentResult[] = [];
-  const pending: { seg: SegmentInputs; b: Bench; p: DriverParams }[] = [];
-  for (const seg of segments) {
-    const b = bench.get(seg.campaign_id) ?? { reg_rate: 0, show_rate: 0, cost_per_identified: 0 };
-    const p = seg[scenario];
-    if (seg.driver === "referral_k") {
-      pending.push({ seg, b, p });
-      continue;
-    }
-    results.push(compute(seg, b, p, scenario, a, 0));
-  }
+  return runResolved(scenario, resolveScenario(scenario, segments), bench, a, scenario === "stretch" ? a.programme_costs_stretch : 0);
+}
+
+function runResolved(scenario: Scenario, resolved: Resolved[], bench: Map<string, Bench>, a: PlannerAssumptions, programme: number): PlanResult {
+  const benchOf = (seg: SegmentInputs) => bench.get(seg.campaign_id) ?? { reg_rate: 0, show_rate: 0, cost_per_identified: 0 };
+  const results: SegmentResult[] = resolved.filter((r) => r.seg.driver !== "referral_k").map((r) => compute(r, benchOf(r.seg), a, 0));
   // Referral identified = k × registrants from all other segments.
   const otherRegistered = results.reduce((s, r) => s + r.registered, 0);
-  for (const { seg, b, p } of pending) results.push(compute(seg, b, p, scenario, a, otherRegistered));
-  results.sort((x, y) => segments.findIndex((s) => s.id === x.id) - segments.findIndex((s) => s.id === y.id));
+  for (const r of resolved.filter((x) => x.seg.driver === "referral_k")) results.push(compute(r, benchOf(r.seg), a, otherRegistered));
+  results.sort((x, y) => resolved.findIndex((r) => r.seg.id === x.id) - resolved.findIndex((r) => r.seg.id === y.id));
 
   const campaignAttendees = results.reduce((s, r) => s + r.attendees, 0);
   const walkIns = campaignAttendees * a.walk_in_share;
-  const programme = scenario === "stretch" ? a.programme_costs_stretch : 0;
   const identified = results.reduce((s, r) => s + r.identified, 0);
   const registered = results.reduce((s, r) => s + r.registered, 0);
   const attendees = campaignAttendees + walkIns;
@@ -127,7 +133,8 @@ export function runPlan(scenario: Scenario, bench: Map<string, Bench>, segments 
   };
 }
 
-function compute(seg: SegmentInputs, b: Bench, p: DriverParams, scenario: Scenario, a: PlannerAssumptions, otherRegistered: number): SegmentResult {
+function compute(r: Resolved, b: Bench, a: PlannerAssumptions, otherRegistered: number): SegmentResult {
+  const { seg, params: p } = r;
   const cpi = b.cost_per_identified * a.inflation;
   let identified = 0;
   let label = "";
@@ -150,12 +157,74 @@ function compute(seg: SegmentInputs, b: Bench, p: DriverParams, scenario: Scenar
       break;
   }
   const regRate = b.reg_rate;
-  const showRate = Math.min(1, b.show_rate + (scenario === "stretch" ? seg.show_uplift_pts_stretch / 100 : 0));
+  const showRate = Math.min(1, b.show_rate + r.upliftPts / 100);
   const registered = identified * regRate;
   const attendees = registered * showRate;
-  let spend = seg.driver === "spend" ? p.spend ?? 0 : identified * cpi;
-  if (scenario === "stretch" && seg.extra_cost_per_attendee_stretch) spend += attendees * seg.extra_cost_per_attendee_stretch;
+  const spend = (seg.driver === "spend" ? p.spend ?? 0 : identified * cpi) + attendees * r.extraCostPerAttendee;
   return { id: seg.id, name: seg.name, campaign_id: seg.campaign_id, driver_label: label, identified, reg_rate: regRate, show_rate: showRate, registered, attendees, spend, cost_per_identified_2025: b.cost_per_identified };
+}
+
+export type DecompositionStep = { bet_id: string; label: string; attendees_after: number; delta_attendees: number; delta_spend: number };
+
+/**
+ * Sequential decomposition of base → stretch into the five bets (Slide 2's waterfall).
+ * Order matters because effects overlap: referrals scale with other segments' registrants,
+ * and show-up uplift multiplies every channel, so it is applied after the reach bets.
+ */
+export function decomposeStretch(bench: Map<string, Bench>, segments = DEFAULT_SEGMENTS, a = DEFAULT_PLANNER_ASSUMPTIONS): { base: number; stretch: number; steps: DecompositionStep[] } {
+  const state = resolveScenario("base", segments);
+  const byId = (id: string) => state.find((r) => r.seg.id === id)!;
+  const toStretch = (id: string) => {
+    const r = byId(id);
+    if (r) r.params = r.seg.stretch;
+  };
+  let programme = 0;
+  const POD_PRIZES = 40000;
+  const SHOW_UP_STACK = a.programme_costs_stretch - POD_PRIZES;
+  const plan: { bet_id: string; label: string; apply: () => void }[] = [
+    { bet_id: "B1", label: "College Pods", apply: () => { toStretch("colleges"); toStretch("clubs"); programme += POD_PRIZES; } },
+    { bet_id: "B3", label: "Ambassador + referral flywheel", apply: () => { toStretch("ambassadors"); toStretch("referrals"); const r = byId("referrals"); r.extraCostPerAttendee = r.seg.extra_cost_per_attendee_stretch ?? 0; } },
+    { bet_id: "B2", label: "Show-Up Engineering", apply: () => { for (const r of state) r.upliftPts = r.seg.show_uplift_pts_stretch; programme += SHOW_UP_STACK; } },
+    { bet_id: "B4", label: "Paid social → retargeting", apply: () => toStretch("paid") },
+    { bet_id: "B5", label: "Creators pay-per-attendee", apply: () => toStretch("creators") },
+  ];
+  let prev = runResolved("base", state, bench, a, programme);
+  const base = prev.totals.attendees;
+  const steps: DecompositionStep[] = [];
+  for (const step of plan) {
+    step.apply();
+    const next = runResolved("stretch", state, bench, a, programme);
+    steps.push({ bet_id: step.bet_id, label: step.label, attendees_after: next.totals.attendees, delta_attendees: next.totals.attendees - prev.totals.attendees, delta_spend: next.totals.spend - prev.totals.spend });
+    prev = next;
+  }
+  return { base, stretch: prev.totals.attendees, steps };
+}
+
+export type BetEconomics = {
+  bet_id: string;
+  delta_attendees: number;
+  delta_spend: number;
+  attendees_per_lakh: number | null;
+  score: number | null; // Δattendees × confidence ÷ Δspend (₹ lakh), for bets that add spend
+  net_if_reinvested: number | null; // for cuts: attendees regained by moving the freed budget into the most efficient bet, minus attendees lost
+};
+
+/** Slide 2 economics computed from the live decomposition. */
+export function betEconomics(steps: DecompositionStep[], confidence: Map<string, number>): BetEconomics[] {
+  const perLakh = (s: DecompositionStep) => (s.delta_spend !== 0 ? Math.abs(s.delta_attendees) / (Math.abs(s.delta_spend) / 100000) : null);
+  const best = Math.max(...steps.filter((s) => s.delta_spend > 0).map((s) => perLakh(s) ?? 0));
+  return steps.map((s) => {
+    const conf = confidence.get(s.bet_id) ?? 0;
+    const adds = s.delta_spend > 0;
+    return {
+      bet_id: s.bet_id,
+      delta_attendees: s.delta_attendees,
+      delta_spend: s.delta_spend,
+      attendees_per_lakh: perLakh(s),
+      score: adds ? (s.delta_attendees * conf) / (s.delta_spend / 100000) : null,
+      net_if_reinvested: adds ? null : (-s.delta_spend / 100000) * best + s.delta_attendees,
+    };
+  });
 }
 
 export type BetRow = { bet_id: string; rank: number; name: string; call: string; incremental_attendees: number; budget_inr: number; confidence: number; score: number | null; attendees_per_lakh: number | null };

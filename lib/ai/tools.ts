@@ -8,7 +8,7 @@ import { listBets, listTasks } from "@/lib/data/management";
 import { computeSnapshot, type Snapshot } from "@/engine/snapshot";
 import { computeTrend, computeBreakdown, TREND_METRICS, BREAKDOWN_DIMENSIONS } from "@/engine/series";
 import { runScenario } from "@/engine/scenario";
-import { benchmarksFrom, runPlan, scoreBets } from "@/engine/planner";
+import { benchmarksFrom, betEconomics, decomposeStretch, runPlan } from "@/engine/planner";
 import { runReadOnlySql, safeCalculate } from "./guards";
 import { ProposedAction, describeAction } from "./action-schemas";
 import { getSql } from "@/lib/db/client";
@@ -214,14 +214,24 @@ export function buildTools(ctx: { asOf: string }) {
         const base = runPlan("base", bench);
         const stretch = runPlan("stretch", bench);
         const bets = await listBets();
-        const scored = scoreBets(bets);
+        const decomp = decomposeStretch(bench);
+        const econ = new Map(betEconomics(decomp.steps, new Map(bets.map((b) => [b.bet_id, b.confidence]))).map((e) => [e.bet_id, e]));
         return {
           note: "Plan figures are assumptions built on 2025 benchmarks, not observed 2026 data.",
           base: { attendees: r0(base.totals.attendees), spend_inr: r0(base.totals.spend), cost_per_attendee_inr: r0(base.totals.cost_per_attendee) },
           stretch: { attendees: r0(stretch.totals.attendees), spend_inr: r0(stretch.totals.spend), cost_per_attendee_inr: r0(stretch.totals.cost_per_attendee) },
           capacity_ceiling: r0(base.capacity.ceiling),
           segments: base.segments.map((b, i) => ({ segment: b.name, benchmark_campaign: b.campaign_id, base_attendees: r0(b.attendees), stretch_attendees: r0(stretch.segments[i].attendees), reg_rate_pct: p1(b.reg_rate), show_rate_pct_base: p1(b.show_rate), show_rate_pct_stretch: p1(stretch.segments[i].show_rate) })),
-          bets: bets.map((b) => ({ id: b.bet_id, rank: b.rank, name: b.name, call: b.call, incremental_attendees: b.incremental_attendees, budget_inr: b.budget_inr, confidence: b.confidence, score: r0(scored.find((x) => x.bet_id === b.bet_id)?.score), scale_rule: b.scale_rule, change_rule: b.change_rule, stop_rule: b.stop_rule })),
+          decomposition_order: "Pods → Flywheel → Show-up → Paid cap → Creators (sequential, to avoid double counting)",
+          bets: bets.map((b) => {
+            const e = econ.get(b.bet_id);
+            return {
+              id: b.bet_id, rank: b.rank, name: b.name, call: b.call, confidence: b.confidence,
+              delta_attendees: r0(e?.delta_attendees), marginal_spend_inr: r0(e?.delta_spend), attendees_per_lakh: r0(e?.attendees_per_lakh),
+              score: r0(e?.score), net_attendees_if_freed_budget_moves_to_pods: r0(e?.net_if_reinvested),
+              scale_rule: b.scale_rule, change_rule: b.change_rule, stop_rule: b.stop_rule,
+            };
+          }),
         };
       },
     }),

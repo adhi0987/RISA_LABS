@@ -180,9 +180,38 @@ It reproduces Slide 1 from **live** 2025 benchmarks (`engine/planner.ts`, tested
 - Stretch: **5,575** for ₹6.75L. That includes ₹85k of programmes: ₹40k pod prizes and the ₹45k show-up stack.
 - Venue ceiling: 6,000 per day × 2 ÷ (1 + the 35.4% two-day share) = **8,865**. The two-day share is computed from the data.
 
+The Planner's totals differ from the deck by ±1 (3,146 vs 3,145; 5,574 vs 5,575). The app sums unrounded segment values; the deck summed rounded ones.
+
 **Bet ranking** (Slide 2)
-- Score = incremental attendees × confidence ÷ cost in ₹ lakh, computed live.
-- *Note:* the deck's Show-Up Engineering score of 475 differs from the formula, which gives 378 × 0.60 ÷ 0.45 = **504**. The ranking is unchanged.
+
+Each bet's contribution comes from a **sequential decomposition**. Starting from the base, the bets are applied one at a time in this order:
+
+1. Pods: colleges 40→70, penetration 3%, clubs 25→40, plus ₹40k prizes.
+2. Flywheel: ambassadors 100→160, referral k 0.17→0.30, plus ₹40 per referred attendee.
+3. Show-up: every show-rate uplift, plus the ₹45k stack.
+4. Paid cap: paid social ₹1.1L → ₹80k.
+5. Creators: creators ₹40k → ₹25k.
+
+The order matters because the effects overlap. Referrals scale with every other segment's registrants, and Show-up multiplies every channel, so it is applied after the reach bets.
+
+The method is implemented twice, and both versions produce the same output:
+- `decomposeStretch()` in `engine/planner.ts`, used live by the app.
+- [`scripts/decomp.py`](scripts/decomp.py), standard library only, which reads the original workbook directly.
+
+```
+$ python scripts/decomp.py
+Bet                                d attendees  marginal Rs  per Rs1L   score/net
+B1 College Pods                          +1444      166,833       866         606
+B3 Ambassador + referral flywheel         +844      118,546       712         392
+B2 Show-Up Engineering                    +378       47,709       792         475
+B4 Paid social -> retargeting             -169      -34,683       489    +131 net
+B5 Creators pay-per-attendee               -69      -16,900       407     +78 net
+```
+
+How to read the output:
+- **Score** = Δ attendees × confidence ÷ the bet's *marginal* ₹ in lakh. Show-up's marginal cost is ₹47.7k: the ₹45k stack plus the extra referral rewards its uplift creates.
+- **Net** (for cuts) = attendees regained if the freed budget moves into Pods, minus the attendees lost.
+- This matches the deck's 606 / 475 / 392 and "+130 / +77 net" (±1 rounding), and the matrix's 866 / 792 / 712 / 488 / 408 attendees per ₹1L.
 
 ---
 
@@ -374,13 +403,28 @@ npm run eval                   # chatbot eval (needs the dev server running)
   - changed data flowing through
   - the planner reproducing 3,145 and 5,575
   - the 8,865 ceiling and the two-day share
-- **Chatbot eval** (`npm run eval`): `<results>`
-- **End to end:**
-  - the workflow in section 1 was run through the API, and proposals were applied through the same code path as the Confirm button
-  - budgets moved by exactly ₹4,850
-  - an AI-sourced task was created
-  - audit rows were written
-  - the data version bumped, so the dashboards refreshed
+  - the sequential decomposition reproducing every Slide 2 number
+
+  **15 of 15 pass.**
+- **Independent cross-check:** `python scripts/decomp.py` recomputes the 2025 benchmarks and the 2026 plan from the raw workbook. It shares no code with the app, and its output matches.
+- **Chatbot eval** (`npm run eval`, 16 conversations and 19 turns, run locally on the free tier): **17/19 passed**, averaging 6.1 s per turn.
+  - Passed: the full workflow, all four cannot-answer cases (college, gender, creative, 2026 actuals), calculations, the T-28 snapshot, unfamiliar questions (one answered through the guarded SQL tool), follow-ups, projection and diagnosis.
+  - The two failures were free-tier **rate limits** on the fallback model during back-to-back requests, not wrong answers.
+  - Since then, the model wrapper retries the primary model when the fallback is rate-limited.
+- **Changed data, through the real UI** (headless browser):
+  - The analyst said Creator Partners had spent **₹54,900**, at ₹220 per confirmed (as of 5 Apr).
+  - A ₹10,000 spend edit was saved on the **Data** page.
+  - Asked again, the analyst said **₹64,900**, at ₹261 per confirmed, and flagged the campaign at 108.6% of budget.
+  - The edit was then reverted.
+- **Browser workflow:**
+  - Opened the panel and asked a question, which streamed an answer with tool chips.
+  - Requested a task, which produced a proposal card.
+  - Clicked **Confirm**: the card showed "Applied", and the task appeared on **Tasks**. No page errors.
+- **Confirm path:**
+  - Proposals applied through the same code as the Confirm button moved budgets by exactly ₹4,850.
+  - An AI-sourced task was created and audit rows were written.
+  - The data version bumped, so the dashboards refreshed.
+  - A second apply of the same proposal is blocked.
 
 ---
 
