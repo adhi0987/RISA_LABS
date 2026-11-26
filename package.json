@@ -9,10 +9,12 @@
     "lint": "eslint",
     "test": "vitest run",
     "db:setup": "tsx --env-file=.env.local scripts/setup-db.ts",
-    "typecheck": "next typegen && tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit",
+    "eval": "tsx --env-file=.env.local scripts/eval.mts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.128",
+    "@ai-sdk/provider": "^4.0.39",
     "@ai-sdk/react": "^4.0.188",
     "ai": "^7.0.183",
     "clsx": "^2.1.1",
@@ -23,7 +25,9 @@
     "postgres": "^4.1.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "react-markdown": "^10.1.0",
     "recharts": "^3.11.1",
+    "remark-gfm": "^4.0.1",
     "server-only": "^0.0.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.6.7"

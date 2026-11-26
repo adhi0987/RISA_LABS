@@ -65,6 +65,13 @@ export async function rejectProposalAction(id: number) {
   return run(() => rejectProposedAction(id), "Rejected");
 }
 
+export async function proposalStatusesAction(ids: number[]): Promise<Record<number, { status: string; error?: string }>> {
+  const clean = ids.filter((x) => Number.isInteger(x)).slice(0, 50);
+  if (clean.length === 0) return {};
+  const rows = await getSql()`select id, status, result from app.proposed_actions where id = any(${clean})`;
+  return Object.fromEntries(rows.map((r) => [r.id, { status: r.status, ...(r.status === "failed" ? { error: (r.result as { error?: string } | null)?.error } : {}) }]));
+}
+
 export async function resetDatasetAction(confirmText: string) {
   if (confirmText !== "RESET") return { ok: false, error: 'Type RESET to confirm.' } as ActionResult;
   return run(async () => {
