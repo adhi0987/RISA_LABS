@@ -110,7 +110,14 @@ export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4
     async doStream(options) {
       if (!primaryAvailable()) {
         onFallback?.(new Error("primary circuit open"));
-        return fallback.doStream(options);
+        try {
+          return await streamWithFirstChunkTimeout(fallback, options, FIRST_CHUNK_MS * 2);
+        } catch (e) {
+          // Fallback rate-limited or overloaded too: give the primary another chance before failing.
+          if (!isRetryable(e) || options.abortSignal?.aborted) throw e;
+          console.warn(`[ai] fallback ${FALLBACK_MODEL} failed (${e instanceof Error ? e.message.slice(0, 80) : e}); retrying primary`);
+          return streamWithFirstChunkTimeout(primary, options, FIRST_CHUNK_MS * 2);
+        }
       }
       try {
         return await streamWithFirstChunkTimeout(primary, options, FIRST_CHUNK_MS);
@@ -118,7 +125,7 @@ export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4
         if (!isRetryable(e) || options.abortSignal?.aborted) throw e;
         console.warn(`[ai] primary ${PRIMARY_MODEL} failed (${e instanceof Error ? e.message.slice(0, 120) : e}); using ${FALLBACK_MODEL}`);
         tripBreaker(e);
-        return fallback.doStream(options);
+        return streamWithFirstChunkTimeout(fallback, options, FIRST_CHUNK_MS * 2);
       }
     },
   };

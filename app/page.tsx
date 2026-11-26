@@ -47,6 +47,23 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
           const p = prog[k];
           if (!p) return null;
           const isVisitors = k === "visitors";
+          if (isVisitors && s.phase === "pre_event") {
+            const mid = s.projection.attendees_mid;
+            return (
+              <Card key={k}>
+                <Stat
+                  label="Verified external visitors (projected)"
+                  value={<span className="text-zinc-700">~{num(mid)}</span>}
+                  sub={<>Goal {num(p.goal)} · range {num(s.projection.attendees_low)}–{num(s.projection.attendees_high)} · observed on event day</>}
+                  tone={mid >= p.goal ? "good" : "bad"}
+                />
+                <div className="mt-3">
+                  <Progress value={(mid / p.goal) * 100} tone={mid >= p.goal ? "emerald" : "amber"} />
+                </div>
+                <div className="mt-2 text-xs text-zinc-500">Mid case is {mid >= p.goal ? "+" : ""}{num(mid - p.goal)} vs goal (run-rate projection)</div>
+              </Card>
+            );
+          }
           return (
             <Card key={k}>
               <Stat

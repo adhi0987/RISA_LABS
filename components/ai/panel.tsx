@@ -176,17 +176,15 @@ function MessageView({ message }: { message: UIMessage }) {
           {tools.filter((p) => p.type !== "tool-propose_actions").map((p, i) => <ToolChip key={p.toolCallId ?? i} part={p} />)}
         </div>
       )}
-      {parts.map((p, i) => {
-        if (p.type === "text" && p.text) {
-          return (
-            <div key={i} className="prose-chat text-sm leading-relaxed text-zinc-800">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{p.text}</ReactMarkdown>
-            </div>
-          );
-        }
-        if (p.type === "tool-propose_actions") return <ProposalCards key={p.toolCallId ?? i} part={p} />;
-        return null;
-      })}
+      {parts.map((p, i) =>
+        p.type === "text" && p.text ? (
+          <div key={i} className="prose-chat text-sm leading-relaxed text-zinc-800">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{p.text}</ReactMarkdown>
+          </div>
+        ) : null,
+      )}
+      {/* Proposal cards go after the text, which tells the user to confirm "below". */}
+      {parts.filter((p) => p.type === "tool-propose_actions").map((p, i) => <ProposalCards key={p.toolCallId ?? i} part={p} />)}
       {meta?.model && <div className="text-[10px] text-zinc-400">{meta.model}{meta.asOf ? ` · data as of ${meta.asOf}` : ""}</div>}
     </div>
   );
