@@ -10,7 +10,7 @@ A working command center for the festival's attendee-growth team, with three par
 
 | | |
 |---|---|
-| Live app | `<deployment URL>` |
+| Live app | `https://risalabs-d7ss4f0j1-adhithyas-projects-6caad5a6.vercel.app` |
 | Code | https://github.com/adhi0987/RISA_LABS |
 | Strategy deck | `CampusFest_2026_Attendee_Growth_Strategy.pdf` (Part 1, three slides) |
 | Original data | [`data/original/Attendee Dataset.xlsx`](data/original/Attendee%20Dataset.xlsx), kept unchanged for testing |
