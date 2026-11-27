@@ -143,7 +143,7 @@ export function AiPanel() {
                 <button className="rounded-lg bg-indigo-600 p-2.5 text-white hover:bg-indigo-700 disabled:opacity-40" disabled={!input.trim()} title="Send"><Send className="h-4 w-4" /></button>
               )}
             </div>
-            <div className="mt-1.5 text-[10px] text-zinc-400">Gemini via tools over this app&apos;s data. Proposed changes apply only when you click Confirm.</div>
+            <div className="mt-1.5 text-[10px] text-zinc-400">AI (OpenRouter free models) answering through tools over this app&apos;s data. Proposed changes apply only when you click Confirm.</div>
           </form>
         </aside>
       )}
