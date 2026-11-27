@@ -271,7 +271,7 @@ Browser ── Next.js 16 (App Router, Vercel, region syd1)
             ├─ Server components → engine/ (pure TS: snapshot · verdicts · series · scenario · planner)
             ├─ Server actions → lib/data/mutations (transaction + audit_log + data_version++)
             └─ /api/chat → Vercel AI SDK 7 streamText + 11 tools → same engine
-                     └─ Gemini (primary) ⇄ Gemini lite (fallback)
+                     └─ OpenRouter: ling-3.2-flash:free → nemotron-3.5-lightning:free → gemma-4-31b-it:free
 Supabase Postgres (session pooler)
   app.*        working copy of the dataset + tasks, bets, proposals, audit log, settings
   analytics.*  read-only views; role analyst_ro is the only thing the AI's SQL tool can use
@@ -287,15 +287,26 @@ Supabase Postgres (session pooler)
 **Running on free tiers**
 - Coarse tools mean a typical answer is 2 model calls. Tool outputs are compact, with rounded values and units in the key names.
 - The static system prompt comes first, which is friendly to implicit caching.
-- Thinking level is set to *low*. The step cap is 6.
+- Only free OpenRouter models are used, so AI cost is ₹0. The step cap is 6.
 - Older turns keep only their text in the history; tool details are dropped.
 - Each visitor gets 15 messages per 10 minutes, and there is a daily call cap, both as Postgres counters with no extra service.
 
-**Resilience**
-- If the primary Gemini model errors (429 / 5xx) **or produces nothing for 12 s**, the call is replayed on the fallback model.
-- A 3-minute circuit breaker then skips the primary, so later steps don't wait again.
-- The primary was overloaded during development, which is exactly why this exists.
+**Model chain and resilience** ([`lib/ai/model.ts`](lib/ai/model.ts))
+- The analyst runs on **OpenRouter** free models through the AI SDK's OpenAI-compatible provider.
+  - Primary: `inclusionai/ling-3.2-flash:free`.
+  - Fallbacks, in order: `nvidia/nemotron-3.5-lightning:free`, then `google/gemma-4-31b-it:free`.
+  - All are configurable via env vars, and all support tool calling.
+- **Failover.** If a model errors (429 / 5xx / 404) **or produces no content within 15 s**, the *same* call is replayed on the next model.
+- **Cooldown.** The failed model is parked: 10 minutes after a rate-limit, 90 seconds after other errors. Later steps don't wait on it, and the free daily quota isn't spent on retries.
+- **Why this matters.** Free models share upstream capacity. During testing the primary was rate-limited upstream, and the chain answered from the next model without the user noticing. The model that actually answered is shown under each reply.
+- Gemini remains available as an opt-in last resort (`AI_GEMINI_FALLBACK=true`).
 - Dataset loads time out and serve the last good copy instead of hanging.
+
+**Grounding guards** (needed because small free models follow instructions less reliably)
+- The first step of every answer **must** call a tool (`toolChoice: required`), so no answer is produced without data.
+- What-if questions are forced through `run_scenario`.
+- Tool outputs include answer-ready `headline` lines that carry the key numbers, and list every verdict group, including "STOP: none".
+- `propose_actions` rejects batches that would change the same budget twice.
 
 **Why the session pooler**
 - Supabase's *transaction* pooler returned cross-wired result sets for pipelined queries in testing. Interaction rows came back with 0 rows, and the daily rows came back with the check-in count.
@@ -303,7 +314,7 @@ Supabase Postgres (session pooler)
 
 **Security**
 - Tables live in a private `app` schema, which Supabase's REST API doesn't expose.
-- The Gemini key is server-only.
+- AI provider keys are server-only.
 - The SQL tool is locked down:
   - single SELECT/WITH only
   - keyword denylist
@@ -363,7 +374,7 @@ The listed gaps:
 
 ## 7. Setup
 
-**Prerequisites:** Node 22, a Supabase project (free tier), and a Gemini API key from Google AI Studio (free tier).
+**Prerequisites:** Node 22, a Supabase project (free tier), and an OpenRouter API key (free models).
 
 ```bash
 npm install
@@ -380,8 +391,10 @@ npm run eval                   # chatbot eval (needs the dev server running)
 |---|---|
 | `DATABASE_URL` | Supabase **session pooler** URI (port 5432) |
 | `DIRECT_URL` | The same URI, used by the setup script |
-| `GEMINI_API_KEY` | Google AI Studio key |
-| `GEMINI_MODEL_PRIMARY` / `GEMINI_MODEL_FALLBACK` | e.g. `gemini-3.6-flash` / `gemini-3.5-flash-lite` |
+| `OPENROUTER_API_KEY` | OpenRouter key (server-only) |
+| `OPENROUTER_MODEL` | Primary model, default `inclusionai/ling-3.2-flash:free` |
+| `OPENROUTER_FALLBACK_MODELS` | Optional comma-separated fallbacks; default `nvidia/nemotron-3.5-lightning:free,google/gemma-4-31b-it:free` |
+| `GEMINI_API_KEY`, `GEMINI_MODEL_PRIMARY`, `GEMINI_MODEL_FALLBACK`, `AI_GEMINI_FALLBACK` | Optional: Gemini as a last resort (set `AI_GEMINI_FALLBACK=true`), or as the provider if no OpenRouter key is set |
 | `AI_DAILY_CALL_CAP` | Daily model-call budget for the public demo (default 600) |
 | `EVAL_TOKEN` | Lets the eval runner bypass the per-visitor limit |
 | `CRON_SECRET` | Optional; Vercel cron secret |
@@ -411,6 +424,15 @@ npm run eval                   # chatbot eval (needs the dev server running)
   - Passed: the full workflow, all four cannot-answer cases (college, gender, creative, 2026 actuals), calculations, the T-28 snapshot, unfamiliar questions (one answered through the guarded SQL tool), follow-ups, projection and diagnosis.
   - The two failures were free-tier **rate limits** on the fallback model during back-to-back requests, not wrong answers.
   - Since then, the model wrapper retries the primary model when the fallback is rate-limited.
+- **After switching to OpenRouter free models:**
+  - The primary `ling-3.2-flash:free` was rate-limited upstream throughout testing, so the chain answered with `nemotron-3.5-lightning:free`.
+  - The first run exposed two weaknesses of the smaller model:
+    - It answered a what-if with its own arithmetic instead of `run_scenario`.
+    - It skipped assumptions.
+  - Added the grounding guards (section 5). The demo workflow then passed **3/3**: diagnose with ₹220 / ₹155 verdicts, a what-if through `run_scenario`, and pending proposals.
+  - A manual read of the answers found two more issues, now fixed deterministically:
+    - A "stop" claim: the headline now lists "STOP: none".
+    - A redundant budget update next to a reallocation: `propose_actions` now rejects the batch.
 - **Changed data, through the real UI** (headless browser):
   - The analyst said Creator Partners had spent **₹54,900**, at ₹220 per confirmed (as of 5 Apr).
   - A ₹10,000 spend edit was saved on the **Data** page.
@@ -435,7 +457,8 @@ npm run eval                   # chatbot eval (needs the dev server running)
 | Next.js 16, React 19, Tailwind CSS 4 | open source | App, UI |
 | Vercel | Hobby (free) | Hosting, cron |
 | Supabase Postgres | Free | Persistence |
-| Google Gemini API (`gemini-3.6-flash`, `gemini-3.5-flash-lite`) | Free tier | AI analyst |
+| OpenRouter (`inclusionai/ling-3.2-flash:free` + free fallbacks), via `@ai-sdk/openai-compatible` | Free models | AI analyst |
+| Google Gemini API (`gemini-3.6-flash`, `gemini-3.5-flash-lite`) | Free tier | Used during development; optional fallback |
 | Vercel AI SDK 7 (`ai`, `@ai-sdk/google`, `@ai-sdk/react`) | open source | Tool loop, streaming, chat hook |
 | postgres.js, SheetJS, mathjs, Recharts, zod, react-markdown | open source | DB driver, xlsx ingest, safe maths, charts, validation, chat rendering |
 | Vitest, tsx | open source | Tests, scripts |
@@ -458,5 +481,6 @@ npm run eval                   # chatbot eval (needs the dev server running)
 
 **App and AI**
 - The demo is open, with no login. It is rate-limited, and "Reset" is available to anyone.
-- Free-tier Gemini can be rate-limited or overloaded. The fallback model and the breaker reduce the impact; the dashboard never depends on the AI.
+- Free OpenRouter models are rate-limited, both upstream and per key: about 50 free-model requests per day on an account with under $10 of credit, and about 1,000 with $10 or more. A typical answer uses 2–4 requests. The fallback chain and cooldowns reduce the impact, and the dashboard never depends on the AI.
+- Smaller free models are less precise than frontier models. The grounding guards (forced tool use, answer-ready headlines, proposal validation) and the visible tool chips are there so a person can check every figure.
 - The AI can still misread a question. Tool chips under each answer show exactly what data was used, so a person can check.

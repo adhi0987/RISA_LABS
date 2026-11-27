@@ -11,10 +11,12 @@
     "db:setup": "tsx --env-file=.env.local scripts/setup-db.ts",
     "typecheck": "next typegen && tsc --noEmit",
     "eval": "tsx --env-file=.env.local scripts/eval.mts",
-    "demo:reset": "tsx --env-file=.env.local scripts/reset-demo.ts"
+    "demo:reset": "tsx --env-file=.env.local scripts/reset-demo.ts",
+    "check:models": "tsx --env-file=.env.local scripts/check-openrouter.mts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.128",
+    "@ai-sdk/openai-compatible": "^3.0.96",
     "@ai-sdk/provider": "^4.0.39",
     "@ai-sdk/react": "^4.0.188",
     "ai": "^7.0.183",

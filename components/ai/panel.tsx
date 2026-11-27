@@ -151,6 +151,11 @@ export function AiPanel() {
   );
 }
 
+/** Some open models leak raw tool-call markup into their text; hide it. */
+function cleanModelText(t: string): string {
+  return t.replace(/<\/?(tool_call|tool_response|function_call)>|<\|[^|>]{1,40}\|>/g, "").replace(/^\s+/, "");
+}
+
 function parseError(e: Error): string {
   try {
     const j = JSON.parse(e.message);
@@ -180,7 +185,7 @@ function MessageView({ message }: { message: UIMessage }) {
       {parts.map((p, i) =>
         p.type === "text" && p.text ? (
           <div key={i} className="prose-chat text-sm leading-relaxed text-zinc-800">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{p.text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanModelText(p.text)}</ReactMarkdown>
           </div>
         ) : null,
       )}

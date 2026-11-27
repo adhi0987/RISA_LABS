@@ -51,7 +51,12 @@ async function ask(history: UIMessage[], asOf: string): Promise<{ message: UIMes
   return { message: last ?? { id: "x", role: "assistant", parts: [] }, ms: Date.now() - t, error };
 }
 
-const textOf = (m: UIMessage) => (m.parts as Part[]).filter((p) => p.type === "text").map((p) => p.text ?? "").join("\n");
+const textOf = (m: UIMessage) =>
+  (m.parts as Part[])
+    .filter((p) => p.type === "text")
+    .map((p) => p.text ?? "")
+    .join("\n")
+    .replace(/<\/?(tool_call|tool_response|function_call)>/g, ""); // same cleanup as the chat panel
 const toolsOf = (m: UIMessage) => (m.parts as Part[]).filter((p) => p.type.startsWith("tool-")).map((p) => p.type.slice(5));
 
 let pass = 0, fail = 0, totalMs = 0, turns = 0;

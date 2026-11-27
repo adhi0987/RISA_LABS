@@ -4,7 +4,7 @@ import { listProposals } from "@/lib/data/management";
 import { computeSnapshot } from "@/engine/snapshot";
 import { buildTools } from "@/lib/ai/tools";
 import { buildInstructions } from "@/lib/ai/prompt";
-import { analystModel, FALLBACK_MODEL, PRIMARY_MODEL } from "@/lib/ai/model";
+import { modelChain, PRIMARY_MODEL } from "@/lib/ai/model";
 import { checkRateLimit, dailyCallsUsed, recordUsage } from "@/lib/ai/guards";
 
 export const dynamic = "force-dynamic";
@@ -40,7 +40,7 @@ function proposalIds(messages: UIMessage[]): number[] {
 
 function friendlyError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  if (/quota|rate|429|resource_exhausted/i.test(msg)) return "The AI model is rate-limited right now (free tier). Please try again in a minute. The dashboard, verdicts and projections keep working without it.";
+  if (/quota|rate|429|resource_exhausted/i.test(msg)) return "All free AI models are busy or rate-limited right now. Please try again in a minute. The dashboard, verdicts and projections keep working without the analyst.";
   if (/overloaded|unavailable|503|high demand/i.test(msg)) return "The AI model is temporarily overloaded. Please retry in a few seconds.";
   return `The analyst hit an error: ${msg.slice(0, 200)}`;
 }
@@ -69,10 +69,11 @@ export async function POST(req: Request) {
   const proposals = await listProposals(proposalIds(messages));
   const owners = cache.dataset.owners.map((o) => `${o.owner_id} ${o.owner_name}`).join(", ");
 
-  let usedFallback = false;
+  const isWhatIf = /\bwhat if\b|\bwhat would happen\b|\bwhat happens if\b|\bscenario\b|\bimpact of (moving|shifting|cutting|adding|increasing|reducing)\b|\bif we (move|moved|shift|cut|add|increase|reduce|double|halve|reallocate|stop|pause)\b/i.test(lastText);
+  let usedModel = PRIMARY_MODEL;
   const result = streamText({
-    model: analystModel(() => {
-      usedFallback = true;
+    model: modelChain((id) => {
+      usedModel = id;
     }),
     instructions: buildInstructions({
       asOf,
@@ -85,6 +86,15 @@ export async function POST(req: Request) {
     messages: await convertToModelMessages(trimHistory(messages)),
     tools: buildTools({ asOf }),
     stopWhen: isStepCount(MAX_STEPS),
+    // Grounding guards (important with smaller free models):
+    // 1) the first step must call a tool, so no answer is produced without fetching data;
+    // 2) what-if questions must go through run_scenario (forced within the first steps if the model skipped it).
+    prepareStep: ({ stepNumber, steps }: { stepNumber: number; steps: { toolCalls: { toolName: string }[] }[] }) => {
+      const used = new Set(steps.flatMap((s) => s.toolCalls.map((c) => c.toolName)));
+      if (isWhatIf && !used.has("run_scenario") && stepNumber >= 1 && stepNumber <= 3) return { toolChoice: { type: "tool" as const, toolName: "run_scenario" as const } };
+      if (stepNumber === 0) return { toolChoice: "required" as const };
+      return {};
+    },
     maxRetries: 1,
     providerOptions: { google: { thinkingConfig: { thinkingLevel: "low" } } },
     onFinish: async (event: unknown) => {
@@ -99,7 +109,7 @@ export async function POST(req: Request) {
       originalMessages: messages,
       onError: friendlyError,
       messageMetadata: ({ part }: { part: { type: string } }) =>
-        part.type === "finish" ? { asOf, model: usedFallback ? FALLBACK_MODEL : PRIMARY_MODEL } : part.type === "start" ? { asOf } : undefined,
+        part.type === "finish" ? { asOf, model: usedModel } : part.type === "start" ? { asOf } : undefined,
     }),
   });
 }

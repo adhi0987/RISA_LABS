@@ -84,9 +84,30 @@ function overview(s: Snapshot) {
       campaigns_losing_more_than_portfolio_rate: s.bottleneck.campaign_excess_loss.map((e) => ({ campaign: `${e.campaign_name} (${e.campaign_id})`, stage: e.stage, campaign_rate_pct: p1(e.campaign_rate), portfolio_rate_pct: p1(e.portfolio_rate), excess_people_lost: e.excess_people_lost })),
     },
     projection: { basis: s.projection.basis, low: s.projection.attendees_low, mid: s.projection.attendees_mid, high: s.projection.attendees_high, visitors_goal: s.projection.visitors_goal, assumptions: s.projection.assumptions },
-    verdict_summary: Object.fromEntries((["scale", "maintain", "fix", "stop", "watch"] as const).map((v) => [v, s.campaigns.filter((c) => c.verdict.call === v).map((c) => c.campaign_name)])),
+    verdicts: verdictHeadline(s),
+    verdict_detail: s.campaigns.map((c) => ({ campaign: `${c.campaign_name} (${c.campaign_id})`, verdict: c.verdict.call, [s.phase === "post_event" ? "cost_per_attendee_inr" : "cost_per_confirmed_inr"]: r0(c.verdict.value), cost_vs_portfolio_pct: r0(c.verdict.ratio_pct) })),
     excluded_from_attendance: { non_external_admissions: s.data_notes.non_external_admissions, denied_or_pending_checkins: s.data_notes.denied_or_pending_checkins },
   };
+}
+
+/** One-line, answer-ready verdict summary with numbers (helps smaller models quote the right figures). */
+function verdictHeadline(s: Snapshot): string {
+  const metric = s.phase === "post_event" ? "per verified attendee" : "per confirmed";
+  const portfolio = s.phase === "post_event" ? s.portfolio.cost_per_attendee : s.portfolio.cost_per_confirmed;
+  const group = (v: string) =>
+    s.campaigns
+      .filter((c) => c.verdict.call === v)
+      .sort((a, b) => (b.verdict.ratio_pct ?? 0) - (a.verdict.ratio_pct ?? 0))
+      .map((c) => {
+        const gap = c.verdict.gap_pts === null ? "" : `, down-funnel ${c.verdict.gap_pts >= 0 ? `${c.verdict.gap_pts.toFixed(1)} pts below` : `${(-c.verdict.gap_pts).toFixed(1)} pts above`} portfolio`;
+        return `${c.campaign_name} ₹${r0(c.verdict.value)} (${r0(c.verdict.ratio_pct)}% of portfolio${v === "fix" || v === "stop" ? gap : ""})`;
+      });
+  // Every group is listed, including empty ones ("STOP: none"), so a model can't invent a stop verdict.
+  const out = ["stop", "fix", "maintain", "watch", "scale"].map((v) => {
+    const g = group(v);
+    return `${v.toUpperCase()}: ${g.length ? g.join(", ") : "none"}`;
+  });
+  return `As of ${s.as_of}, cost ${metric} vs portfolio ₹${r0(portfolio)}. ${out.join(" | ")}`;
 }
 
 export function buildTools(ctx: { asOf: string }) {
@@ -111,6 +132,7 @@ export function buildTools(ctx: { asOf: string }) {
           phase: s.phase,
           verdict_metric: s.phase === "post_event" ? "₹ per verified attendee vs portfolio; down-funnel = registered→attended" : "₹ per confirmed registration vs portfolio; down-funnel = registered→confirmed",
           portfolio: { cost_per_confirmed_inr: r0(s.portfolio.cost_per_confirmed), cost_per_attendee_inr: r0(s.portfolio.cost_per_attendee), confirm_rate_pct: p1(s.portfolio.confirm_rate), show_rate_pct: p1(s.portfolio.show_rate), reg_rate_pct: p1(s.portfolio.reg_rate) },
+          headline: verdictHeadline(s),
           campaigns: list.map((c) => campaignRow(c, s.phase)),
           ...(campaign_ids?.length && list.length < campaign_ids.length ? { missing_ids: campaign_ids.filter((id) => !list.some((c) => c.campaign_id === id)) } : {}),
         };
@@ -186,7 +208,15 @@ export function buildTools(ctx: { asOf: string }) {
       }),
       execute: async ({ as_of, changes }) => {
         const { s, cache } = await snap(as_of, ctx.asOf);
-        return runScenario(s, cache.settings, changes);
+        const r = runScenario(s, cache.settings, changes);
+        const parts = r.per_campaign.map(
+          (p) => `${p.campaign_name} ${p.budget_change_inr >= 0 ? "+" : "−"}₹${Math.abs(p.budget_change_inr).toLocaleString("en-IN")}: ${p.delta_attendees >= 0 ? "+" : ""}${p.delta_attendees} attendees`,
+        );
+        const headline =
+          `As of ${r.as_of} (${r.basis.replaceAll("_", " ")}): ${parts.join("; ")}. ` +
+          `Net ${r.totals.delta_attendees >= 0 ? "+" : ""}${r.totals.delta_attendees} attendees → ${r.totals.scenario_attendees.toLocaleString("en-IN")} vs visitors goal ${r.totals.visitors_goal?.toLocaleString("en-IN") ?? "n/a"}. ` +
+          `ASSUMPTIONS (state these): ${r.assumptions[0]} ${r.assumptions[1]}`;
+        return { headline, ...r };
       },
     }),
 
@@ -263,7 +293,15 @@ export function buildTools(ctx: { asOf: string }) {
           for (const id of ids) if (!names.campaigns.has(id)) errors.push(`Unknown campaign ${id}`);
           if ("owner_id" in a && a.owner_id && !names.owners.has(a.owner_id)) errors.push(`Unknown owner ${a.owner_id}`);
         }
-        if (errors.length) return { ok: false, errors, hint: "Fix the IDs (see get_campaigns / get_tasks) and call propose_actions again." };
+        // A batch must not change the same campaign's budget twice (reallocation + direct set would double-count
+        // depending on confirm order).
+        const reallocated = new Set(actions.flatMap((a) => (a.type === "reallocate_budget" ? [a.from_campaign_id, a.to_campaign_id] : [])));
+        for (const a of actions) {
+          if (a.type === "update_campaign" && a.budget_inr !== undefined && reallocated.has(a.campaign_id)) {
+            errors.push(`${a.campaign_id}: reallocate_budget already changes this budget; drop the separate budget_inr update (it would double-count).`);
+          }
+        }
+        if (errors.length) return { ok: false, errors, hint: "Fix these problems and call propose_actions again with the corrected list." };
         const sql = getSql();
         const created: { id: number; summary: string }[] = [];
         for (const a of actions) {

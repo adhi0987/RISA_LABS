@@ -1,27 +1,62 @@
 import "server-only";
-// Gemini models with automatic fallback.
-// - Errors (429 / 5xx / 404 / quota / overload) on the primary → same call retried on the fallback model.
-// - Hangs: if the primary produces no content within FIRST_CHUNK_MS, the call is aborted and replayed on the fallback.
-// - Circuit breaker: after a primary failure, skip it for BREAKER_MS so later steps don't pay the timeout again.
+// Model chain for the AI analyst, served through OpenRouter.
+// - Primary: OPENROUTER_MODEL (default inclusionai/ling-3.2-flash:free).
+// - Fallbacks: OPENROUTER_FALLBACK_MODELS (comma-separated, tool-capable free models).
+// - Optional last resort: Gemini, only when AI_GEMINI_FALLBACK=true and GEMINI_API_KEY is set
+//   (or when no OpenRouter key is configured at all).
+// Each call goes to the first available model. On a retryable failure (429 / 5xx / 404 / overload)
+// or no content within FIRST_CHUNK_MS, the SAME call is replayed on the next model, and the failed
+// model is put on a short cooldown so later steps skip it.
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { LanguageModelV4 } from "@ai-sdk/provider";
 
-const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY });
+const FIRST_CHUNK_MS = 15_000;
+const COOLDOWN_MS = 90_000; // generic failures
+const RATE_LIMIT_COOLDOWN_MS = 10 * 60_000; // upstream 429s: free quota is scarce, so stop re-trying for a while
+const DEFAULT_OPENROUTER_MODEL = "inclusionai/ling-3.2-flash:free";
+const DEFAULT_OPENROUTER_FALLBACKS = "nvidia/nemotron-3.5-lightning:free,google/gemma-4-31b-it:free";
 
-export const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-3.6-flash";
-export const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-3.5-flash-lite";
+type Candidate = { id: string; model: LanguageModelV4 };
+const g = globalThis as unknown as { __modelDownUntil?: Map<string, number> };
+const downUntil = (g.__modelDownUntil ??= new Map());
 
-const FIRST_CHUNK_MS = 12_000;
-const BREAKER_MS = 3 * 60_000;
-const g = globalThis as unknown as { __primaryDownUntil?: number };
+function buildCandidates(): Candidate[] {
+  const list: Candidate[] = [];
+  const orKey = process.env.OPENROUTER_API_KEY;
+  if (orKey) {
+    const openrouter = createOpenAICompatible({
+      name: "openrouter",
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: orKey,
+      includeUsage: true,
+      headers: { "X-Title": "CampusFest Growth Center" },
+    });
+    const ids = [process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL, ...(process.env.OPENROUTER_FALLBACK_MODELS ?? DEFAULT_OPENROUTER_FALLBACKS).split(",")]
+      .map((s) => s.trim())
+      .filter((s, i, a) => s && a.indexOf(s) === i);
+    for (const id of ids) list.push({ id, model: openrouter(id) as unknown as LanguageModelV4 });
+  }
+  const geKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (geKey && (!orKey || process.env.AI_GEMINI_FALLBACK === "true")) {
+    const google = createGoogleGenerativeAI({ apiKey: geKey });
+    for (const id of [process.env.GEMINI_MODEL_PRIMARY, process.env.GEMINI_MODEL_FALLBACK].filter(Boolean) as string[]) {
+      list.push({ id, model: google(id) as unknown as LanguageModelV4 });
+    }
+  }
+  if (list.length === 0) throw new Error("No AI model configured: set OPENROUTER_API_KEY (and optionally OPENROUTER_MODEL).");
+  return list;
+}
+
+export const PRIMARY_MODEL = process.env.OPENROUTER_API_KEY ? process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL : process.env.GEMINI_MODEL_PRIMARY || "gemini";
 
 function isRetryable(e: unknown): boolean {
-  const err = e as { statusCode?: number; status?: number; message?: string; lastError?: unknown; name?: string };
+  const err = e as { statusCode?: number; status?: number; message?: string; lastError?: unknown; name?: string; responseBody?: string };
   if (err?.name === "AbortError" || err?.name === "TimeoutError" || /first-chunk timeout/i.test(err?.message ?? "")) return true;
   const status = err?.statusCode ?? err?.status;
-  if (status === 429 || status === 404 || (typeof status === "number" && status >= 500)) return true;
+  if (status === 429 || status === 404 || status === 402 || status === 408 || (typeof status === "number" && status >= 500)) return true;
   if (err?.lastError) return isRetryable(err.lastError);
-  return /quota|rate limit|resource_exhausted|overloaded|unavailable|high demand|try again|timed? ?out/i.test(err?.message ?? "");
+  return /quota|rate.?limit|resource_exhausted|overloaded|unavailable|high demand|try again|timed? ?out|provider returned error|no endpoints/i.test(`${err?.message ?? ""} ${err?.responseBody ?? ""}`);
 }
 
 type StreamOpts = Parameters<LanguageModelV4["doStream"]>[0];
@@ -38,7 +73,7 @@ function linkedController(outer?: AbortSignal) {
   return ctrl;
 }
 
-/** Start a stream and wait for its first content-bearing chunk (bounded), then hand back a replaying stream. */
+/** Start a stream and wait (bounded) for its first content-bearing chunk, then hand back a replaying stream. */
 async function streamWithFirstChunkTimeout(model: LanguageModelV4, options: StreamOpts, ms: number): Promise<StreamResult> {
   const ctrl = linkedController(options.abortSignal);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -83,54 +118,40 @@ async function streamWithFirstChunkTimeout(model: LanguageModelV4, options: Stre
   }
 }
 
-export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4, onFallback?: (e: unknown) => void): LanguageModelV4 {
-  const primaryAvailable = () => !g.__primaryDownUntil || Date.now() > g.__primaryDownUntil;
-  const tripBreaker = (e: unknown) => {
-    g.__primaryDownUntil = Date.now() + BREAKER_MS;
-    onFallback?.(e);
-  };
-  return {
-    specificationVersion: primary.specificationVersion,
-    provider: primary.provider,
-    modelId: primary.modelId,
-    supportedUrls: primary.supportedUrls,
-    async doGenerate(options) {
-      if (!primaryAvailable()) {
-        onFallback?.(new Error("primary circuit open"));
-        return fallback.doGenerate(options);
-      }
-      try {
-        return await primary.doGenerate(options);
-      } catch (e) {
-        if (!isRetryable(e) || options.abortSignal?.aborted) throw e;
-        tripBreaker(e);
-        return fallback.doGenerate(options);
-      }
-    },
-    async doStream(options) {
-      if (!primaryAvailable()) {
-        onFallback?.(new Error("primary circuit open"));
-        try {
-          return await streamWithFirstChunkTimeout(fallback, options, FIRST_CHUNK_MS * 2);
-        } catch (e) {
-          // Fallback rate-limited or overloaded too: give the primary another chance before failing.
-          if (!isRetryable(e) || options.abortSignal?.aborted) throw e;
-          console.warn(`[ai] fallback ${FALLBACK_MODEL} failed (${e instanceof Error ? e.message.slice(0, 80) : e}); retrying primary`);
-          return streamWithFirstChunkTimeout(primary, options, FIRST_CHUNK_MS * 2);
-        }
-      }
-      try {
-        return await streamWithFirstChunkTimeout(primary, options, FIRST_CHUNK_MS);
-      } catch (e) {
-        if (!isRetryable(e) || options.abortSignal?.aborted) throw e;
-        console.warn(`[ai] primary ${PRIMARY_MODEL} failed (${e instanceof Error ? e.message.slice(0, 120) : e}); using ${FALLBACK_MODEL}`);
-        tripBreaker(e);
-        return streamWithFirstChunkTimeout(fallback, options, FIRST_CHUNK_MS * 2);
-      }
-    },
-  };
+/** Order candidates: available ones first (in configured order), then cooling-down ones as a last resort. */
+function ordered(cands: Candidate[]) {
+  const now = Date.now();
+  const up = cands.filter((c) => (downUntil.get(c.id) ?? 0) <= now);
+  const down = cands.filter((c) => (downUntil.get(c.id) ?? 0) > now);
+  return [...up, ...down];
 }
 
-export function analystModel(onFallback?: (e: unknown) => void) {
-  return withFallback(google(PRIMARY_MODEL) as unknown as LanguageModelV4, google(FALLBACK_MODEL) as unknown as LanguageModelV4, onFallback);
+export function modelChain(onUse?: (modelId: string) => void): LanguageModelV4 {
+  const cands = buildCandidates();
+  const first = cands[0].model;
+  const attempt = async <T>(fn: (m: LanguageModelV4) => PromiseLike<T>, abortSignal?: AbortSignal): Promise<T> => {
+    let lastError: unknown;
+    for (const c of ordered(cands)) {
+      try {
+        const r = await fn(c.model);
+        onUse?.(c.id);
+        return r;
+      } catch (e) {
+        lastError = e;
+        if (!isRetryable(e) || abortSignal?.aborted) throw e;
+        const status = (e as { statusCode?: number })?.statusCode;
+        downUntil.set(c.id, Date.now() + (status === 429 ? RATE_LIMIT_COOLDOWN_MS : COOLDOWN_MS));
+        console.warn(`[ai] ${c.id} failed (${e instanceof Error ? e.message.slice(0, 100) : String(e)}); trying next model`);
+      }
+    }
+    throw lastError;
+  };
+  return {
+    specificationVersion: first.specificationVersion,
+    provider: first.provider,
+    modelId: cands[0].id,
+    supportedUrls: first.supportedUrls,
+    doGenerate: (options) => attempt((m) => m.doGenerate(options), options.abortSignal),
+    doStream: (options) => attempt((m) => streamWithFirstChunkTimeout(m, options, FIRST_CHUNK_MS), options.abortSignal),
+  };
 }
